@@ -202,19 +202,15 @@ impl Context {
 
     /// Remove a window from context
     pub fn destroy_window(&mut self, window_id: WindowId) {
-        // Remove from focus stack
+        let was_focused = self.focused_window == Some(window_id);
+
         self.focus_stack.retain(|&id| id != window_id);
-
-        // Update focused window if necessary
-        if self.focused_window == Some(window_id) {
-            if let Some(&next_id) = self.focus_stack.first() {
-                self.focus(next_id);
-            } else {
-                self.clear_keyboard_focus();
-            }
-        }
-
         self.windows.remove(&window_id);
+
+        if was_focused {
+            self.focused_window = None;
+            self.restore_focus_from_stack();
+        }
     }
 
     /// Create a new output and add to context
