@@ -341,12 +341,24 @@ pub struct GlyphBitmap<'a> {
     pub advance: i32,
 }
 
+impl GlyphBitmap<'_> {
+    pub fn display_advance(&self, target_height: i32) -> i32 {
+        if self.pixel_mode == GlyphPixelMode::Bgra && self.rows > target_height.max(1) {
+            return scale_positive(self.advance, target_height.max(1), self.rows);
+        }
+        self.advance
+    }
+}
+
 pub fn measure_text(query: Option<&str>, font_size: f32, text: &str) -> Option<f32> {
     let size_px = font_size.round().max(1.0) as u32;
     line_metrics(query, size_px)?;
     let mut width = 0i32;
     for ch in text.chars() {
-        width += with_glyph(query, size_px, ch, |glyph| glyph.advance).unwrap_or(0);
+        width += with_glyph(query, size_px, ch, |glyph| {
+            glyph.display_advance(size_px as i32)
+        })
+        .unwrap_or(0);
     }
     Some(width as f32)
 }
@@ -455,6 +467,13 @@ fn font_match_from_pattern(font: *mut fc::FcPattern) -> Option<FontMatch> {
             index,
         })
     }
+}
+
+fn scale_positive(value: i32, num: i32, den: i32) -> i32 {
+    if value <= 0 || num <= 0 || den <= 0 {
+        return value;
+    }
+    (((value as i64 * num as i64) + den as i64 - 1) / den as i64).max(1) as i32
 }
 
 fn set_pixel_size(face: ft::FT_Face, size_px: u32) -> bool {

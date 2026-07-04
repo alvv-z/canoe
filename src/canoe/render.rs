@@ -174,9 +174,11 @@ impl<'a> Renderer<'a> {
         let max_x = origin_x + area_width - padding_x;
         let pixels = self.data_mut();
 
+        let target_height = line_height.min(area_height).max(1);
+
         for ch in text.chars() {
             let Some(advance) = font::with_glyph(font_name, size_px, ch, |glyph| {
-                let advance = glyph.advance;
+                let advance = glyph.display_advance(target_height);
                 if x_pos + advance > max_x {
                     return advance;
                 }
@@ -187,18 +189,27 @@ impl<'a> Renderer<'a> {
                     return advance;
                 }
 
+                let (scale_num, scale_den) =
+                    if glyph.pixel_mode == font::GlyphPixelMode::Bgra && rows > target_height {
+                        (target_height, rows)
+                    } else {
+                        (1, 1)
+                    };
+                let draw_width = scale_positive(width, scale_num, scale_den);
+                let draw_rows = scale_positive(rows, scale_num, scale_den);
+                let glyph_x = x_pos + scale_i32(glyph.left, scale_num, scale_den);
+                let glyph_y = baseline_y - scale_i32(glyph.top, scale_num, scale_den);
                 let pitch = glyph.pitch;
                 let abs_pitch = pitch.abs();
-                let glyph_x = x_pos + glyph.left;
-                let glyph_y = baseline_y - glyph.top;
 
-                for row in 0..rows {
+                for row in 0..draw_rows {
+                    let src_row = row * scale_den / scale_num;
                     let row_offset = if pitch < 0 {
-                        (rows - 1 - row) * abs_pitch
+                        (rows - 1 - src_row) * abs_pitch
                     } else {
-                        row * abs_pitch
+                        src_row * abs_pitch
                     } as usize;
-                    for col in 0..width {
+                    for col in 0..draw_width {
                         let px = glyph_x + col;
                         let py = glyph_y + row;
 
@@ -215,9 +226,10 @@ impl<'a> Renderer<'a> {
                             if offset + 4 > pixels.len() {
                                 continue;
                             }
+                            let src_col = col * scale_den / scale_num;
                             match glyph.pixel_mode {
                                 font::GlyphPixelMode::Gray => {
-                                    let idx = row_offset + col as usize;
+                                    let idx = row_offset + src_col as usize;
                                     if idx >= glyph.buffer.len() {
                                         continue;
                                     }
@@ -231,7 +243,7 @@ impl<'a> Renderer<'a> {
                                     }
                                 }
                                 font::GlyphPixelMode::Bgra => {
-                                    let idx = row_offset + col as usize * 4;
+                                    let idx = row_offset + src_col as usize * 4;
                                     if idx + 4 > glyph.buffer.len() {
                                         continue;
                                     }
@@ -263,6 +275,20 @@ impl<'a> Renderer<'a> {
             x_pos += advance;
         }
     }
+}
+
+fn scale_positive(value: i32, num: i32, den: i32) -> i32 {
+    if value <= 0 || num <= 0 || den <= 0 {
+        return value;
+    }
+    (((value as i64 * num as i64) + den as i64 - 1) / den as i64).max(1) as i32
+}
+
+fn scale_i32(value: i32, num: i32, den: i32) -> i32 {
+    if value == 0 || num <= 0 || den <= 0 {
+        return value;
+    }
+    (value as i64 * num as i64 / den as i64) as i32
 }
 
 fn blend_pixel(bg: &mut [u8], fg_argb: u32, alpha: u8) {
