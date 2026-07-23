@@ -148,16 +148,18 @@ pub fn button_rects(
 ) -> TitlebarButtons {
     let size = titlebar_height;
     let y = 0;
+    
+    // Right-to-left: Close is always the rightmost (yeah I'm not using Windows
+    // 3.1, sorry), then maximize, then hide. Maximize and hide are optional
+    let mut right_x = content_width - BUTTON_PADDING_X - size;
+
     let close = Rect {
-        x: BUTTON_PADDING_X,
+        x: right_x.max(0),
         y,
         width: size,
         height: size,
     };
-
-    // Right-to-left: maximize is the rightmost (if present), then hide; if
-    // maximize is hidden, the hide button slides into the rightmost slot.
-    let mut right_x = content_width - BUTTON_PADDING_X - size;
+    right_x -= size + BUTTON_GAP;
     let maximize = if show_maximize {
         let r = Rect {
             x: right_x.max(0),
@@ -182,9 +184,9 @@ pub fn button_rects(
     };
 
     TitlebarButtons {
-        close,
         hide,
         maximize,
+        close,
     }
 }
 
@@ -923,8 +925,7 @@ impl Titlebar {
                 // Render title text if we have a title and font
                 if let Some(title_str) = title {
                     if !title_str.is_empty() {
-                        let text_start =
-                            (buttons.close.x + buttons.close.width + BUTTON_GAP).max(0);
+                        let text_start = BUTTON_PADDING_X;
                         let text_padding = (ui.font_size * 0.5).round().max(0.0) as i32;
                         let right_x = buttons
                             .hide
