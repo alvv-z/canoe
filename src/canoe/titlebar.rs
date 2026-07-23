@@ -555,8 +555,22 @@ impl Titlebar {
             let shadow = rgba_to_argb(ui.button_shadow);
             let close_pressed_bg = rgba_to_argb(BUTTON_BG_PRESSED_LEFT);
 
-            let close_normal = build_button_fill(size_px, button_bg);
-            let close_pressed = build_button_fill(size_px, close_pressed_bg);
+            let close_normal = build_button_bevel_cache(
+                size_px,
+                titlebar_height, 
+                button_bg,
+                highlight,
+                shadow,
+                false
+            );
+            let close_pressed = build_button_bevel_cache(
+                size_px,
+                titlebar_height,
+                close_pressed_bg,
+                highlight,
+                shadow,
+                true
+            );
             let hide_normal = build_button_bevel_cache(
                 size_px,
                 titlebar_height,
@@ -1151,17 +1165,6 @@ fn rgba_to_argb(rgba: u32) -> u32 {
     let b = (rgba >> 8) & 0xff;
     let a = rgba & 0xff;
     (a << 24) | (r << 16) | (g << 8) | b
-}
-
-fn build_button_fill(size_px: i32, color_argb: u32) -> Vec<u8> {
-    if size_px <= 0 {
-        return Vec::new();
-    }
-    let mut pixels = vec![0u8; (size_px * size_px * 4) as usize];
-    if let Some(mut renderer) = Renderer::new(&mut pixels, size_px, size_px) {
-        renderer.fill_rect(0, 0, size_px, size_px, color_argb);
-    }
-    pixels
 }
 
 fn build_button_bevel_cache(
