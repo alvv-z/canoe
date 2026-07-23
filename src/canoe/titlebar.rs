@@ -25,10 +25,10 @@ const BORDER_INNER: i32 = 1;
 const BUTTON_PADDING_X: i32 = 0;
 const BUTTON_GAP: i32 = 1;
 
-const ICON_CLOSE_SVG: &str = include_str!("../../assets/icons/close.svg");
-const ICON_MINIMIZE_SVG: &str = include_str!("../../assets/icons/minimize.svg");
-const ICON_MAXIMIZE_SVG: &str = include_str!("../../assets/icons/maximize.svg");
-const ICON_UNMAXIMIZE_SVG: &str = include_str!("../../assets/icons/unmaximize.svg");
+const ICON_CLOSE_SVG: &str = include_str!("../../assets/icons/close-modern.svg");
+const ICON_MINIMIZE_SVG: &str = include_str!("../../assets/icons/minimize-modern.svg");
+const ICON_MAXIMIZE_SVG: &str = include_str!("../../assets/icons/maximize-modern.svg");
+const ICON_UNMAXIMIZE_SVG: &str = include_str!("../../assets/icons/unmaximize-modern.svg");
 
 struct BaseFrameParams<'a> {
     ui: &'a UiConfig,
@@ -126,6 +126,7 @@ struct IconCache {
 
 impl IconCache {
     fn build(size_px: i32) -> Option<Self> {
+        // TODO: Make these recolorable
         let close = rasterize_icon(ICON_CLOSE_SVG, size_px)?;
         let minimize = rasterize_icon(ICON_MINIMIZE_SVG, size_px)?;
         let maximize = rasterize_icon(ICON_MAXIMIZE_SVG, size_px)?;
