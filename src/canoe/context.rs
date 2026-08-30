@@ -1137,6 +1137,19 @@ impl Context {
     }
 
     fn current_output_for_new_window(&self) -> Option<OutputId> {
+        // Prefer the output the pointer is currently on.
+        if let Some(seat_id) = self.current_seat {
+            if let Some(seat) = self.seats.get(&seat_id) {
+                let (px, py) = {
+                    let s = seat.borrow();
+                    (s.pointer_x, s.pointer_y)
+                };
+                if let Some(output_id) = self.output_at_point(px, py) {
+                    return Some(output_id);
+                }
+            }
+        }
+
         let focused_output = self
             .focused_window
             .and_then(|window_id| self.output_for_window_id(window_id));
