@@ -1615,6 +1615,11 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                         }
                     }
                 }
+                // Apply configured XCursor theme for compositor-rendered cursors.
+                {
+                    let theme = state.context.borrow().config.xcursor_theme_resolved();
+                    seat.borrow().set_xcursor_theme(&theme.name, theme.size);
+                }
             }
             Event::SessionLocked => {
                 state.context.borrow_mut().session_locked = true;
