@@ -149,7 +149,7 @@ pub fn button_rects(
 ) -> TitlebarButtons {
     let size = titlebar_height;
     let y = 0;
-    
+
     // Right-to-left: Close is always the rightmost (yeah I'm not using Windows
     // 3.1, sorry), then maximize, then hide. Maximize and hide are optional
     let mut right_x = content_width - BUTTON_PADDING_X - size;
@@ -557,11 +557,11 @@ impl Titlebar {
 
             let close_normal = build_button_bevel_cache(
                 size_px,
-                titlebar_height, 
+                titlebar_height,
                 button_bg,
                 highlight,
                 shadow,
-                false
+                false,
             );
             let close_pressed = build_button_bevel_cache(
                 size_px,
@@ -569,7 +569,7 @@ impl Titlebar {
                 close_pressed_bg,
                 highlight,
                 shadow,
-                true
+                true,
             );
             let hide_normal = build_button_bevel_cache(
                 size_px,

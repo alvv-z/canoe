@@ -11,11 +11,7 @@
         "aarch64-linux"
       ];
       forAllSystems =
-        f:
-        nixpkgs.lib.genAttrs supportedSystems (
-          system:
-          f (import nixpkgs { inherit system; })
-        );
+        f: nixpkgs.lib.genAttrs supportedSystems (system: f (import nixpkgs { inherit system; }));
     in
     {
       overlays.default = final: prev: {
