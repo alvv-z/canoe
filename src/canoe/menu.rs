@@ -254,6 +254,19 @@ impl WindowMenu {
         false
     }
 
+    /// Remove the item for `window_id`; returns it and the index to select
+    /// next (clamped to the shrunken list), if it was present.
+    pub fn remove_window(&mut self, window_id: WindowId) -> Option<(MenuItem, Option<usize>)> {
+        let idx = self.items.iter().position(|item| item.window_id == window_id)?;
+        let item = self.items.remove(idx);
+        self.hovered = if self.items.is_empty() {
+            None
+        } else {
+            Some(idx.min(self.items.len() - 1))
+        };
+        Some((item, self.hovered))
+    }
+
     pub fn ensure_buffer<D>(&mut self, shm: &wl_shm::WlShm, qh: &QueueHandle<D>, scale: i32)
     where
         D: 'static
@@ -611,6 +624,12 @@ impl WindowMenu {
 
         self.cache = Some(MenuCache { key, pixels });
         true
+    }
+
+    /// Recompute the surface size for the current items/theme, e.g. after
+    /// `remove_window` shrank the list.
+    pub fn remeasure(&self) -> (i32, i32) {
+        measure_menu(&self.items, &self.theme, self.header_title.as_deref())
     }
 }
 

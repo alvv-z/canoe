@@ -278,6 +278,22 @@ pub fn default_xkb_bindings(
             Action::ToggleFullscreen { in_window: false },
             super::BindingEvent::Pressed,
         ),
+        // Close the selected window while alt-tabbing (macOS-style q); the
+        // alt-tab filter routes Close to the switcher when it is open.
+        (
+            Mode::Default,
+            Keysym::q.raw(),
+            main,
+            Action::Close,
+            super::BindingEvent::Pressed,
+        ),
+        (
+            Mode::Default,
+            Keysym::q.raw(),
+            main | shift,
+            Action::Close,
+            super::BindingEvent::Pressed,
+        ),
         // Spawn terminal
         (
             Mode::Default,

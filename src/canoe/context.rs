@@ -547,7 +547,9 @@ impl Context {
                 self.running = false;
             }
             Action::Close => {
-                if let Some(window_id) = self.focused_window {
+                if self.window_menu_mode == Some(WindowMenuMode::AltTab) {
+                    self.alt_tab_close_selected();
+                } else if let Some(window_id) = self.focused_window {
                     if let Some(window) = self.windows.get(&window_id) {
                         window.borrow().close();
                     }
@@ -701,6 +703,69 @@ impl Context {
                 let state = self.get_state();
                 func(&state, arg);
             }
+        }
+    }
+
+    /// Close the window selected in the alt-tab switcher and keep the
+    /// switcher open (macOS-style). The entry is removed optimistically;
+    /// if the client refuses to close it reappears in the next session.
+    fn alt_tab_close_selected(&mut self) {
+        let selected = self
+            .window_menu
+            .as_ref()
+            .and_then(|m| m.hovered)
+            .and_then(|i| self.window_menu.as_ref()?.items.get(i))
+            .map(|it| it.window_id);
+        let Some(window_id) = selected else {
+            return;
+        };
+        let Some(menu) = self.window_menu.as_mut() else {
+            return;
+        };
+        let Some((_item, next_idx)) = menu.remove_window(window_id) else {
+            return;
+        };
+        let next_window = next_idx.and_then(|i| menu.items.get(i).map(|it| it.window_id));
+
+        // Shrink the surface to the remaining rows; the layer shell
+        // reconfigures with the new size and the buffer is reallocated.
+        if !menu.items.is_empty() {
+            let (new_w, new_h) = menu.remeasure();
+            if (new_w, new_h) != (menu.width, menu.height) {
+                menu.reset_buffer();
+                menu.width = new_w;
+                menu.height = new_h;
+                menu.layer_surface.set_size(new_w as u32, new_h as u32);
+                menu.surface.commit();
+            }
+        }
+
+        // Drop from the session's stack snapshot so cancel/commit never
+        // resurrect it.
+        if let Some(ref mut stack) = self.window_menu_alt_tab_stack {
+            stack.retain(|&id| id != window_id);
+        }
+        if self.window_menu_alt_tab_focused == Some(window_id) {
+            self.window_menu_alt_tab_focused = None;
+        }
+        if self.window_menu_alt_tab_preview == Some(window_id) {
+            self.window_menu_alt_tab_preview = None;
+            self.window_menu_alt_tab_preview_was_hidden = false;
+        }
+
+        if let Some(window) = self.windows.get(&window_id) {
+            window.borrow().close();
+        }
+
+        if self
+            .window_menu
+            .as_ref()
+            .map(|m| m.items.is_empty())
+            .unwrap_or(true)
+        {
+            self.close_window_menu();
+        } else if let Some(next_id) = next_window {
+            self.preview_alt_tab_window(next_id);
         }
     }
 

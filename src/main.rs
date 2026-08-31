@@ -1310,6 +1310,9 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                         }
                     }
                 }
+                if state.context.borrow().window_menu_mode == Some(canoe::WindowMenuMode::AltTab) {
+                    render_window_menu(state, qh);
+                }
                 state.context.borrow().finish_manage();
                 sync_desktop_backgrounds(state, qh);
                 render_all_desktop_surfaces(state, qh);
@@ -2478,6 +2481,7 @@ impl Dispatch<RiverXkbBindingV1, (canoe::SeatId, usize)> for AppState {
                         binding::Action::WindowMenuCycle
                             | binding::Action::WindowMenuCycleApp
                             | binding::Action::WindowMenuCancel
+                            | binding::Action::Close
                     )
                 {
                     return;
