@@ -1004,9 +1004,17 @@ impl Context {
         pointer_x: i32,
         pointer_y: i32,
     ) {
-        let Some(output_id) = self.output_at_point(pointer_x, pointer_y) else {
-            return;
-        };
+      let Some(output_id) = self.output_at_point(pointer_x, pointer_y) else {
+          return;
+      };
+
+      // Keep river's default layer-shell output under the pointer so
+      // launchers/bars open on the monitor the user is looking at.
+      if self.current_output != Some(output_id) {
+          self.current_output = Some(output_id);
+          self.set_default_layer_shell_output(output_id);
+      }
+
 
         let Some(window_id) = self.focused_window else {
             return;
