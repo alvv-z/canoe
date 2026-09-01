@@ -84,6 +84,11 @@ pub struct Context {
     window_menu_alt_tab_focused: Option<WindowId>,
     window_menu_alt_tab_preview: Option<WindowId>,
     window_menu_alt_tab_preview_was_hidden: bool,
+
+    /// Outputs that moved since the last manage sequence: (id, dx, dy).
+    pub pending_output_shifts: Vec<(OutputId, i32, i32)>,
+    /// Windows anchored to a removed output: (window_id, dead usable area).
+    pub pending_output_orphans: Vec<(WindowId, (i32, i32, i32, i32))>,
 }
 
 impl Context {
@@ -132,6 +137,9 @@ impl Context {
             window_menu_alt_tab_focused: None,
             window_menu_alt_tab_preview: None,
             window_menu_alt_tab_preview_was_hidden: false,
+
+            pending_output_shifts: Vec::new(),
+            pending_output_orphans: Vec::new(),
         }
     }
 
@@ -240,6 +248,23 @@ impl Context {
 
     /// Remove an output from context
     pub fn destroy_output(&mut self, output_id: OutputId) {
+        if let Some(output) = self.outputs.get(&output_id) {
+            let dead_area = output.borrow().usable_area();
+            for (&window_id, window) in &self.windows {
+                let anchored = window
+                    .borrow()
+                    .output
+                    .as_ref()
+                    .and_then(|o| o.upgrade())
+                    .map(|o| o.borrow().id == output_id)
+                    .unwrap_or(false);
+                if anchored {
+                    self.pending_output_orphans.push((window_id, dead_area));
+                    window.borrow_mut().output = None;
+                }
+            }
+        }
+
         // Update current output if necessary
         if self.current_output == Some(output_id) {
             self.current_output = self.outputs.keys().find(|&&id| id != output_id).copied();
@@ -1069,17 +1094,16 @@ impl Context {
         pointer_x: i32,
         pointer_y: i32,
     ) {
-      let Some(output_id) = self.output_at_point(pointer_x, pointer_y) else {
-          return;
-      };
+        let Some(output_id) = self.output_at_point(pointer_x, pointer_y) else {
+            return;
+        };
 
-      // Keep river's default layer-shell output under the pointer so
-      // launchers/bars open on the monitor the user is looking at.
-      if self.current_output != Some(output_id) {
-          self.current_output = Some(output_id);
-          self.set_default_layer_shell_output(output_id);
-      }
-
+        // Keep river's default layer-shell output under the pointer so
+        // launchers/bars open on the monitor the user is looking at.
+        if self.current_output != Some(output_id) {
+            self.current_output = Some(output_id);
+            self.set_default_layer_shell_output(output_id);
+        }
 
         let Some(window_id) = self.focused_window else {
             return;
@@ -1877,6 +1901,18 @@ impl Context {
                 w.pending_unfullscreen_restore = false;
             }
         }
+
+        let shifts = std::mem::take(&mut self.pending_output_shifts);
+          for (output_id, dx, dy) in shifts {
+              self.apply_output_shift(output_id, dx, dy);
+          }
+          let orphans = std::mem::take(&mut self.pending_output_orphans);
+          if !orphans.is_empty() {
+              for (window_id, dead_area) in orphans {
+                  self.migrate_orphaned_window(window_id, dead_area);
+              }
+              self.mark_all_desktops_dirty(); // icons follow their window
+          }
 
         // Process seat actions
         let seat_ids: Vec<SeatId> = self.seats.keys().copied().collect();
@@ -2875,6 +2911,131 @@ impl Context {
 
         seat.borrow_mut().set_cursor_shape(shape);
     }
+    /// Windows anchored to an output that moved keep their position relative
+    /// to it (river re-anchors remaining outputs on unplug, which would
+    /// otherwise strand them at stale global coordinates).
+    fn apply_output_shift(&mut self, output_id: OutputId, dx: i32, dy: i32) {
+        for window in self.windows.values() {
+            let mut w = window.borrow_mut();
+            if w.position_undefined {
+                continue;
+            }
+            let anchored = w
+                .output
+                .as_ref()
+                .and_then(|o| o.upgrade())
+                .map(|o| o.borrow().id == output_id)
+                .unwrap_or(false);
+            if !anchored {
+                continue;
+            }
+            let (new_x, new_y) = (w.x + dx, w.y + dy);
+            w.set_position(new_x, new_y);
+            if let Some(ref mut saved) = w.pre_snap {
+                saved.x += dx;
+                saved.y += dy;
+            }
+            if let Some(ref mut saved) = w.pre_fullscreen {
+                saved.x += dx;
+                saved.y += dy;
+            }
+        }
+    }
+
+    /// Move a window from a removed output onto a remaining one, mapping its
+    /// geometry proportionally. Maximized/snapped state is preserved (saved
+    /// geometries remapped too); fullscreen-on-the-dead-output degrades to
+    /// its pre-fullscreen geometry per the protocol's implicit exit.
+    fn migrate_orphaned_window(&mut self, window_id: WindowId, dead_area: (i32, i32, i32, i32)) {
+        let target_id = self
+            .current_output
+            .filter(|id| self.outputs.contains_key(id))
+            .or_else(|| self.outputs.keys().next().copied());
+        let Some(target_id) = target_id else {
+            self.pending_output_orphans.push((window_id, dead_area));
+            return;
+        };
+        let Some(target) = self.outputs.get(&target_id).cloned() else {
+            return;
+        };
+        let new_area = target.borrow().usable_area();
+        if new_area.2 <= 0 || new_area.3 <= 0 {
+            self.pending_output_orphans.push((window_id, dead_area));
+            return;
+        }
+
+        let (rect, snap_state, maximized, pre_snap, stale_fullscreen) = {
+            let Some(window) = self.windows.get(&window_id) else {
+                return;
+            };
+            let mut w = window.borrow_mut();
+
+            // Per river_window_v1.fullscreen: river implicitly exits
+            // fullscreen when the fullscreen output is removed. Sync local
+            // state and use the pre-fullscreen geometry as migration base.
+            let mut stale_fullscreen = false;
+            if let super::window::FullscreenState::Output(weak) = &w.fullscreen {
+                if weak.upgrade().is_none() {
+                    if let Some(ref rwm_window) = w.rwm_window {
+                        rwm_window.inform_not_fullscreen();
+                    }
+                    w.fullscreen = super::window::FullscreenState::None;
+                    w.pending_unfullscreen_restore = false;
+                    stale_fullscreen = true;
+                }
+            }
+            let rect = if stale_fullscreen {
+                w.pre_fullscreen.unwrap_or(super::window::SavedGeometry {
+                    x: w.x,
+                    y: w.y,
+                    width: w.width,
+                    height: w.height,
+                })
+            } else {
+                super::window::SavedGeometry {
+                    x: w.x,
+                    y: w.y,
+                    width: w.width,
+                    height: w.height,
+                }
+            };
+            (rect, w.snap_state, w.maximized, w.pre_snap, stale_fullscreen)
+        };
+
+        let force_resize = snap_state.is_some() || maximized;
+        let needs_resize =
+            force_resize || rect.width.max(1) > new_area.2 || rect.height.max(1) > new_area.3;
+        let (new_x, new_y, new_w, new_h) = map_rect_between_areas(
+            rect.x, rect.y, rect.width, rect.height, dead_area, new_area, needs_resize,
+        );
+        let mapped_pre_snap = if snap_state.is_some() {
+            pre_snap.map(|s| {
+                let (px, py, pw, ph) =
+                    map_rect_between_areas(s.x, s.y, s.width, s.height, dead_area, new_area, true);
+                super::window::SavedGeometry { x: px, y: py, width: pw, height: ph }
+            })
+        } else {
+            None
+        };
+
+        self.set_window_output(window_id, target_id);
+        if let Some(window) = self.windows.get(&window_id) {
+            let mut w = window.borrow_mut();
+            if let Some(saved) = mapped_pre_snap {
+                w.pre_snap = Some(saved);
+            }
+            if stale_fullscreen {
+                w.pre_fullscreen = None;
+            }
+            w.set_position(new_x, new_y);
+            if needs_resize {
+                w.propose_dimensions(new_w, new_h);
+            }
+        }
+        if maximized {
+            self.maximize_window(window_id); // exact maximized geometry on target
+        }
+    }
 }
 
 impl Default for Context {
@@ -3026,4 +3187,38 @@ fn menu_item_from_window(
         hidden: window.hidden,
         active: focused == Some(window_id),
     }
+}
+
+/// Proportionally map a rect from one output area to another, clamped to
+/// fit. `resize = false` keeps the rect's size (clamped); `true` scales it
+/// with the area ratio.
+fn map_rect_between_areas(
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    old_area: (i32, i32, i32, i32),
+    new_area: (i32, i32, i32, i32),
+    resize: bool,
+) -> (i32, i32, i32, i32) {
+    let (ox, oy, ow, oh) = old_area;
+    let (nx, ny, nw, nh) = new_area;
+    let rect_w = w.max(1);
+    let rect_h = h.max(1);
+    let ratio_w = rect_w as f32 / ow as f32;
+    let ratio_h = rect_h as f32 / oh as f32;
+    let mut new_w = if resize { (ratio_w * nw as f32).round() as i32 } else { rect_w };
+    let mut new_h = if resize { (ratio_h * nh as f32).round() as i32 } else { rect_h };
+    new_w = new_w.max(1).min(nw);
+    new_h = new_h.max(1).min(nh);
+
+    let rel_x = (x - ox) as f32 / ow as f32;
+    let rel_y = (y - oy) as f32 / oh as f32;
+    let mut new_x = nx + (rel_x * nw as f32).round() as i32;
+    let mut new_y = ny + (rel_y * nh as f32).round() as i32;
+    let max_x = nx + (nw - new_w).max(0);
+    let max_y = ny + (nh - new_h).max(0);
+    new_x = new_x.clamp(nx, max_x);
+    new_y = new_y.clamp(ny, max_y);
+    (new_x, new_y, new_w, new_h)
 }
