@@ -15,7 +15,8 @@ use std::process::{Command, Stdio};
 use std::rc::Rc;
 
 use super::{
-    MenuItem, Output, OutputId, Seat, SeatId, Window, WindowId, WindowMenu, WindowMenuMode,
+    MenuItem, Output, OutputId, Seat, SeatId, SnapPreview, SnapTarget, Window, WindowId,
+    WindowMenu, WindowMenuMode,
 };
 
 /// The central window manager context
@@ -85,6 +86,11 @@ pub struct Context {
     window_menu_alt_tab_preview: Option<WindowId>,
     window_menu_alt_tab_preview_was_hidden: bool,
 
+    /// Edge-snap target currently hovered during a move op, if any.
+    pub snap_target: Option<SnapTarget>,
+    /// Preview overlay surface for the snap target area.
+    pub snap_preview: Option<SnapPreview>,
+
     /// Outputs that moved since the last manage sequence: (id, dx, dy).
     pub pending_output_shifts: Vec<(OutputId, i32, i32)>,
     /// Windows anchored to a removed output: (window_id, dead usable area).
@@ -137,6 +143,9 @@ impl Context {
             window_menu_alt_tab_focused: None,
             window_menu_alt_tab_preview: None,
             window_menu_alt_tab_preview_was_hidden: false,
+
+            snap_target: None,
+            snap_preview: None,
 
             pending_output_shifts: Vec::new(),
             pending_output_orphans: Vec::new(),
@@ -728,6 +737,10 @@ impl Context {
                 let state = self.get_state();
                 func(&state, arg);
             }
+            Action::EndMoveWithSnap { window_id } => {
+                self.end_move_with_snap(window_id);
+                self.update_window_output_from_position(window_id);
+            }
         }
     }
 
@@ -1104,6 +1117,18 @@ impl Context {
             self.current_output = Some(output_id);
             self.set_default_layer_shell_output(output_id);
         }
+
+        // Snap-to-edge preview while a move op is active on this seat.
+        let move_active = self
+            .focused_window
+            .and_then(|wid| self.windows.get(&wid))
+            .map(|w| matches!(w.borrow().operator, super::window::Operator::Move { .. }))
+            .unwrap_or(false);
+        self.snap_target = if move_active {
+            self.snap_target_at(pointer_x, pointer_y)
+        } else {
+            None
+        };
 
         let Some(window_id) = self.focused_window else {
             return;
@@ -1903,16 +1928,16 @@ impl Context {
         }
 
         let shifts = std::mem::take(&mut self.pending_output_shifts);
-          for (output_id, dx, dy) in shifts {
-              self.apply_output_shift(output_id, dx, dy);
-          }
-          let orphans = std::mem::take(&mut self.pending_output_orphans);
-          if !orphans.is_empty() {
-              for (window_id, dead_area) in orphans {
-                  self.migrate_orphaned_window(window_id, dead_area);
-              }
-              self.mark_all_desktops_dirty(); // icons follow their window
-          }
+        for (output_id, dx, dy) in shifts {
+            self.apply_output_shift(output_id, dx, dy);
+        }
+        let orphans = std::mem::take(&mut self.pending_output_orphans);
+        if !orphans.is_empty() {
+            for (window_id, dead_area) in orphans {
+                self.migrate_orphaned_window(window_id, dead_area);
+            }
+            self.mark_all_desktops_dirty(); // icons follow their window
+        }
 
         // Process seat actions
         let seat_ids: Vec<SeatId> = self.seats.keys().copied().collect();
@@ -2999,20 +3024,37 @@ impl Context {
                     height: w.height,
                 }
             };
-            (rect, w.snap_state, w.maximized, w.pre_snap, stale_fullscreen)
+            (
+                rect,
+                w.snap_state,
+                w.maximized,
+                w.pre_snap,
+                stale_fullscreen,
+            )
         };
 
         let force_resize = snap_state.is_some() || maximized;
         let needs_resize =
             force_resize || rect.width.max(1) > new_area.2 || rect.height.max(1) > new_area.3;
         let (new_x, new_y, new_w, new_h) = map_rect_between_areas(
-            rect.x, rect.y, rect.width, rect.height, dead_area, new_area, needs_resize,
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+            dead_area,
+            new_area,
+            needs_resize,
         );
         let mapped_pre_snap = if snap_state.is_some() {
             pre_snap.map(|s| {
                 let (px, py, pw, ph) =
                     map_rect_between_areas(s.x, s.y, s.width, s.height, dead_area, new_area, true);
-                super::window::SavedGeometry { x: px, y: py, width: pw, height: ph }
+                super::window::SavedGeometry {
+                    x: px,
+                    y: py,
+                    width: pw,
+                    height: ph,
+                }
             })
         } else {
             None
@@ -3034,6 +3076,68 @@ impl Context {
         }
         if maximized {
             self.maximize_window(window_id); // exact maximized geometry on target
+        }
+    }
+    /// Which snap target (if any) the pointer is close enough to trigger,
+    /// based on the usable area of the output under the pointer.
+    pub fn snap_target_at(&self, pointer_x: i32, pointer_y: i32) -> Option<SnapTarget> {
+        let margin = self.config.ui.snap_edge_margin;
+        if margin <= 0 {
+            return None;
+        }
+        let output_id = self.output_at_point(pointer_x, pointer_y)?;
+        let output = self.outputs.get(&output_id)?;
+        let (ox, oy, ow, oh) = output.borrow().usable_area();
+        if ow <= 0 || oh <= 0 {
+            return None;
+        }
+        // Top edge wins over sides when in a corner (feels more deliberate).
+        if (pointer_y - oy).abs() <= margin {
+            return Some(SnapTarget::Maximize);
+        }
+        if (pointer_x - ox).abs() <= margin {
+            return Some(SnapTarget::Left);
+        }
+        if (pointer_x - (ox + ow)).abs() <= margin {
+            return Some(SnapTarget::Right);
+        }
+        None
+    }
+
+    /// The rectangle a snap target maps to on the given output, in global
+    /// coordinates (the usable area or one half of it).
+    pub fn snap_area(
+        &self,
+        output_id: OutputId,
+        target: SnapTarget,
+    ) -> Option<(i32, i32, i32, i32)> {
+        let output = self.outputs.get(&output_id)?;
+        let (ox, oy, ow, oh) = output.borrow().usable_area();
+        if ow <= 0 || oh <= 0 {
+            return None;
+        }
+        match target {
+            SnapTarget::Maximize => Some((ox, oy, ow, oh)),
+            SnapTarget::Left => Some((ox, oy, ow / 2, oh)),
+            SnapTarget::Right => Some((ox + ow / 2, oy, ow - ow / 2, oh)),
+        }
+    }
+
+    /// End a move op, snapping to the hovered edge target if one is active.
+    pub fn end_move_with_snap(&mut self, window_id: WindowId) {
+        let target = self.snap_target.take();
+        if let Some(window) = self.windows.get(&window_id) {
+            window.borrow_mut().end_operation();
+        }
+        match target {
+            Some(SnapTarget::Maximize) => self.maximize_window(window_id),
+            Some(SnapTarget::Left) => {
+                self.smart_snap_half(window_id, crate::binding::action::SnapSide::Left)
+            }
+            Some(SnapTarget::Right) => {
+                self.smart_snap_half(window_id, crate::binding::action::SnapSide::Right)
+            }
+            None => {}
         }
     }
 }
@@ -3207,8 +3311,16 @@ fn map_rect_between_areas(
     let rect_h = h.max(1);
     let ratio_w = rect_w as f32 / ow as f32;
     let ratio_h = rect_h as f32 / oh as f32;
-    let mut new_w = if resize { (ratio_w * nw as f32).round() as i32 } else { rect_w };
-    let mut new_h = if resize { (ratio_h * nh as f32).round() as i32 } else { rect_h };
+    let mut new_w = if resize {
+        (ratio_w * nw as f32).round() as i32
+    } else {
+        rect_w
+    };
+    let mut new_h = if resize {
+        (ratio_h * nh as f32).round() as i32
+    } else {
+        rect_h
+    };
     new_w = new_w.max(1).min(nw);
     new_h = new_h.max(1).min(nh);
 

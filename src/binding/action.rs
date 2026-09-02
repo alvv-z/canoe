@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use crate::canoe::WindowId;
 use crate::config::Mode;
 
 /// Direction for iteration/movement
@@ -101,6 +102,11 @@ pub enum Action {
     WindowMenuCommit,
     /// Cancel the window switcher menu, restoring the previously focused window
     WindowMenuCancel,
+
+    /// End a pointer move op, snapping to the hovered edge target if any.
+    /// Queued from the OpRelease event so end_operation + propose_dimensions
+    /// run inside the manage sequence.
+    EndMoveWithSnap { window_id: WindowId },
 
     /// Clear keyboard focus
     ClearFocus,

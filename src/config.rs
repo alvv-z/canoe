@@ -163,6 +163,13 @@ pub struct UiConfig {
     /// Text color for the selected icon and its label. When `None`, falls
     /// back to [`UiConfig::menu_highlight_text`].
     pub icons_highlight_text: Option<u32>,
+    /// Fill color for the edge-snap preview overlay (0xRRGGBBAA). A
+    /// translucent accent works best; fully transparent disables the
+    /// preview (snapping still happens).
+    pub snap_preview_color: u32,
+    /// Pointer distance from a usable-area edge (logical px) that triggers
+    /// the snap preview while dragging a window. 0 disables edge snapping.
+    pub snap_edge_margin: i32,
 }
 
 impl Default for UiConfig {
@@ -196,6 +203,8 @@ impl Default for UiConfig {
             icons_text: None,
             icons_highlight_bg: None,
             icons_highlight_text: None,
+            snap_edge_margin: 20,
+            snap_preview_color: 0x3080FF40,
         }
     }
 }
@@ -374,6 +383,9 @@ struct UiConfigFile {
     icons_highlight_bg: Option<u32>,
     #[serde(default, deserialize_with = "deserialize_opt_color")]
     icons_highlight_text: Option<u32>,
+    snap_edge_margin: Option<i32>,
+    #[serde(default, deserialize_with = "deserialize_opt_color")]
+    snap_preview_color: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -495,6 +507,12 @@ impl UiConfig {
         }
         if let Some(color) = overrides.icons_highlight_text {
             self.icons_highlight_text = Some(color);
+        }
+        if let Some(margin) = overrides.snap_edge_margin {
+            self.snap_edge_margin = margin.max(0);
+        }
+        if let Some(color) = overrides.snap_preview_color {
+            self.snap_preview_color = color;
         }
     }
 }

@@ -1127,6 +1127,128 @@ fn sync_desktop_backgrounds(state: &mut AppState, qh: &QueueHandle<AppState>) {
     }
 }
 
+/// Create/update/destroy the snap preview overlay to match the current
+/// `snap_target`. Called after manage/render sequences and on pointer moves
+/// during a drag.
+fn sync_snap_preview(state: &mut AppState, qh: &QueueHandle<AppState>) {
+    let (Some(compositor), Some(layer_shell)) = (
+        state.globals.compositor.as_ref(),
+        state.globals.wlr_layer_shell.as_ref(),
+    ) else {
+        return;
+    };
+
+    let preview_color = state.context.borrow().config.ui.snap_preview_color;
+
+    let wanted = {
+        let context = state.context.borrow();
+        context.snap_target.and_then(|target| {
+            let output_id = context.current_output?;
+            let (ax, ay, aw, ah) = context.snap_area(output_id, target)?;
+            let output = context.outputs.get(&output_id)?;
+            let out = output.borrow();
+            // Layer-surface margins are output-local.
+            Some((
+                output_id,
+                ax - out.x,
+                ay - out.y,
+                aw,
+                ah,
+                out.wl_output.clone(),
+            ))
+        })
+    };
+
+    let Some((output_id, local_x, local_y, w, h, wl_output)) = wanted else {
+        // No target: drop the surface if it exists.
+        state.context.borrow_mut().snap_preview = None;
+        return;
+    };
+
+    // Retarget if the preview moved to another output.
+    {
+        let mut context = state.context.borrow_mut();
+        if let Some(preview) = context.snap_preview.as_ref() {
+            if preview.output_id != output_id {
+                context.snap_preview = None;
+            }
+        }
+    }
+
+    // Create if needed.
+    let exists = state.context.borrow().snap_preview.is_some();
+    if !exists {
+        let surface = compositor.create_surface(qh, ());
+        let layer_surface = layer_shell.get_layer_surface(
+            &surface,
+            wl_output.as_ref(),
+            wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::Layer::Overlay,
+            "canoe-snap-preview".to_string(),
+            qh,
+            canoe::LayerSurfaceKind::SnapPreview(output_id),
+        );
+        layer_surface.set_anchor(
+            wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::Anchor::Top
+                | wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::Anchor::Left,
+        );
+        layer_surface.set_exclusive_zone(-1);
+        layer_surface.set_keyboard_interactivity(
+            wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::KeyboardInteractivity::None,
+        );
+        layer_surface.set_size(w.max(1) as u32, h.max(1) as u32);
+        layer_surface.set_margin(local_y, 0, 0, local_x);
+        surface.commit();
+        state.context.borrow_mut().snap_preview =
+            Some(canoe::SnapPreview::new(surface, layer_surface, output_id));
+        return; // Configure event will render it.
+    }
+
+    // Existing preview: resize/reposition if the target area changed.
+    let (needs_resize, shm_available) = {
+        let context = state.context.borrow();
+        let Some(preview) = context.snap_preview.as_ref() else {
+            return;
+        };
+        (
+            (preview.width, preview.height) != (w, h),
+            state.globals.shm.is_some(),
+        )
+    };
+    {
+        let context = state.context.borrow();
+        let Some(preview) = context.snap_preview.as_ref() else {
+            return;
+        };
+        if needs_resize {
+            preview
+                .layer_surface
+                .set_size(w.max(1) as u32, h.max(1) as u32);
+        }
+        preview.layer_surface.set_margin(local_y, 0, 0, local_x);
+        preview.surface.commit();
+    }
+    if !shm_available {
+        return;
+    }
+
+    // Repaint immediately when already configured (resize triggers a fresh
+    // Configure, which renders via the dispatch arm).
+    if !needs_resize {
+        let mut context = state.context.borrow_mut();
+        let Some(preview) = context.snap_preview.as_mut() else {
+            return;
+        };
+        if preview.configured && preview.dirty {
+            let shm = state.globals.shm.as_ref().unwrap();
+            preview.ensure_buffer(shm, qh);
+            preview.render(preview_color);
+            preview.update_input_region(compositor, qh);
+            preview.commit();
+            preview.dirty = false;
+        }
+    }
+}
+
 impl Dispatch<wl_registry::WlRegistry, ()> for AppState {
     fn event(
         state: &mut Self,
@@ -1315,6 +1437,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppState {
                 }
                 state.context.borrow().finish_manage();
                 sync_desktop_backgrounds(state, qh);
+                sync_snap_preview(state, qh);
                 render_all_desktop_surfaces(state, qh);
             }
             Event::RenderStart => {
@@ -2162,19 +2285,17 @@ impl Dispatch<RiverSeatV1, canoe::SeatId> for AppState {
                 }
             }
             Event::OpRelease => {
-                // End operation
                 let (window_id, was_move) = {
                     let context = state.context.borrow();
                     if let Some(wid) = context.focused_window {
-                        if let Some(window) = context.windows.get(&wid) {
-                            let mut w = window.borrow_mut();
-                            let was_move =
-                                matches!(w.operator, canoe::window::Operator::Move { .. });
-                            w.end_operation();
-                            (Some(wid), was_move)
-                        } else {
-                            (None, false)
-                        }
+                        let is_move = context
+                            .windows
+                            .get(&wid)
+                            .map(|w| {
+                                matches!(w.borrow().operator, canoe::window::Operator::Move { .. })
+                            })
+                            .unwrap_or(false);
+                        (Some(wid), is_move)
                     } else {
                         (None, false)
                     }
@@ -2182,13 +2303,22 @@ impl Dispatch<RiverSeatV1, canoe::SeatId> for AppState {
                 seat.borrow().end_pointer_op();
                 if was_move {
                     if let Some(window_id) = window_id {
-                        state
-                            .context
-                            .borrow_mut()
-                            .update_window_output_from_position(window_id);
+                        // end_operation + snap must run inside the manage sequence.
+                        seat.borrow_mut()
+                            .queue_action(binding::Action::EndMoveWithSnap { window_id });
+                        request_manage_dirty(state);
+                    }
+                } else {
+                    // Resize end: unchanged path.
+                    let context = state.context.borrow();
+                    if let Some(wid) = context.focused_window {
+                        if let Some(window) = context.windows.get(&wid) {
+                            window.borrow_mut().end_operation();
+                        }
                     }
                 }
                 state.context.borrow_mut().update_cursor_for_seat(*seat_id);
+                sync_snap_preview(state, qh);
             }
             Event::PointerPosition { x, y } => {
                 seat.borrow_mut().update_pointer_position(x, y);
@@ -2196,6 +2326,7 @@ impl Dispatch<RiverSeatV1, canoe::SeatId> for AppState {
                     .context
                     .borrow_mut()
                     .update_window_output_from_pointer(*seat_id, x, y);
+                sync_snap_preview(state, qh);
                 state.context.borrow_mut().update_cursor_for_seat(*seat_id);
                 update_menu_hover_from_global(state, *seat_id, qh);
                 let titlebar_window =
@@ -2328,6 +2459,34 @@ impl Dispatch<ZwlrLayerSurfaceV1, canoe::LayerSurfaceKind> for AppState {
                             shield.commit();
                         }
                     }
+                    canoe::LayerSurfaceKind::SnapPreview(output_id) => {
+                        let preview_color = state.context.borrow().config.ui.snap_preview_color;
+
+                        let (shm_available, compositor_available) = (
+                            state.globals.shm.is_some(),
+                            state.globals.compositor.is_some(),
+                        );
+                        let mut context = state.context.borrow_mut();
+                        let Some(preview) = context.snap_preview.as_mut() else {
+                            return;
+                        };
+                        if preview.output_id != *output_id {
+                            return;
+                        }
+                        if (preview.width, preview.height) != (width as i32, height as i32) {
+                            preview.reset_buffer();
+                        }
+                        preview.configure(width as i32, height as i32);
+                        if shm_available && compositor_available {
+                            let shm = state.globals.shm.as_ref().unwrap();
+                            let compositor = state.globals.compositor.as_ref().unwrap();
+                            preview.ensure_buffer(shm, qh);
+                            preview.render(preview_color);
+                            preview.update_input_region(compositor, qh);
+                            preview.commit();
+                            preview.dirty = false;
+                        }
+                    }
                 }
             }
             Event::Closed => match kind {
@@ -2348,6 +2507,14 @@ impl Dispatch<ZwlrLayerSurfaceV1, canoe::LayerSurfaceKind> for AppState {
                     if let Some(shield) = state.context.borrow().window_menu_shield.as_ref() {
                         if shield.output_id == *output_id {
                             state.context.borrow_mut().window_menu_shield = None;
+                        }
+                    }
+                }
+                canoe::LayerSurfaceKind::SnapPreview(output_id) => {
+                    let mut context = state.context.borrow_mut();
+                    if let Some(preview) = context.snap_preview.as_ref() {
+                        if preview.output_id == *output_id {
+                            context.snap_preview = None;
                         }
                     }
                 }

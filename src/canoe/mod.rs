@@ -10,6 +10,7 @@ mod seat;
 mod shadow;
 mod shield;
 pub mod shmfile;
+mod snap_preview;
 pub mod titlebar;
 pub mod window;
 
@@ -20,6 +21,7 @@ pub use output::{Output, OutputId};
 pub use seat::{PointerTarget, Seat, SeatId};
 pub use shadow::WindowShadow;
 pub use shield::ShieldSurface;
+pub use snap_preview::SnapPreview;
 pub use titlebar::Titlebar;
 pub use window::{Window, WindowEvent, WindowId};
 
@@ -30,6 +32,13 @@ pub enum WindowMenuMode {
     AltTab,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapTarget {
+    Left,
+    Right,
+    Maximize,
+}
+
 /// User data for layer shell surfaces owned by the WM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayerSurfaceKind {
@@ -37,4 +46,5 @@ pub enum LayerSurfaceKind {
     DesktopBackground(OutputId),
     Menu,
     MenuShield(OutputId),
+    SnapPreview(OutputId),
 }
